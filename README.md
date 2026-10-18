@@ -1,102 +1,87 @@
 # Distributed Smart Grid Peak Load Forecasting and Regional Demand Analytics Using Hadoop and Spark
 
-Big-data pipeline that forecasts daily peak electricity demand for Indian states/regions.
+A big-data pipeline that forecasts daily peak electricity demand for Indian states and regions, with dashboards for viewing forecasts and managing the pipeline.
 
-**Pipeline:** CSV → HDFS → Pig (cleaning) → Hive (Parquet, partitioned by state) → PySpark window features → Spark MLlib regression → CSV → Streamlit dashboards
+## Overview
 
-| Layer | Tool |
+Daily demand data is stored in HDFS, cleaned with Apache Pig, organised in Hive, and used to train forecasting models in Spark MLlib. Predictions are presented in Streamlit dashboards for end users and operators.
+
+```
+CSV  →  HDFS  →  Pig (cleaning)  →  Hive (partitioned)  →  Spark MLlib  →  Streamlit
+```
+
+## Technology Stack
+
+| Purpose | Technology |
 |---|---|
-| Storage | HDFS |
-| Cleaning | Apache Pig 0.17 (local mode) |
-| Warehouse | Hive, Parquet partitioned by `state` |
-| Processing / ML | PySpark window functions, Spark MLlib (Linear Regression, Random Forest) |
-| Serving | Streamlit + Plotly (user view and operator console) |
-| Runtime | Docker Desktop (WSL2), `bde2020` Hadoop/Hive images, `bitnamilegacy/spark:3.5` |
+| Distributed storage | Hadoop HDFS |
+| Data cleaning | Apache Pig |
+| Data warehouse | Apache Hive (Parquet, partitioned by state) |
+| Processing and modelling | PySpark, Spark MLlib |
+| Dashboards | Streamlit, Plotly |
+| Deployment | Docker Compose |
 
 ## Dataset
-"Indian Power Demand & Shortage Data (2020–2025)" from Kaggle (daily, state-wise, from Grid-India/POSOCO).
-Save it as `data/grid_demand.csv` (9 columns, 36 entities x 1,917 days = 69,012 rows).
 
-## Repository layout
+Indian Power Demand & Shortage Data (2020–2025), daily state-wise records from Grid-India (POSOCO), available on Kaggle. Place the file at `data/grid_demand.csv`.
+
+## Repository Structure
+
 ```
-docker-compose.yml        cluster definition (7 containers)
-hadoop.env                shared Hadoop/Hive config
-data/clean_grid_data.pig  Pig cleaning script
-sql/create_tables.hql     Hive tables
-scripts/train_model.py    PySpark feature engineering + MLlib training
-dashboard.py              basic dashboard
-user_interface.py         viewer app
-operator_interface.py     operator console (data view, training, logs)
-requirements.txt          Python packages for the Streamlit apps
+docker-compose.yml       Cluster configuration
+hadoop.env               Shared Hadoop/Hive settings
+data/clean_grid_data.pig Data cleaning script
+sql/create_tables.hql    Hive table definitions
+scripts/train_model.py   Feature engineering and model training
+user_interface.py        User dashboard
+operator_interface.py    Operator console
+dashboard.py             Basic dashboard
+requirements.txt         Python dependencies
 ```
 
-## Setup (Windows 11, Docker Desktop)
-1. Install Docker Desktop with the WSL2 backend (give it about 8 GB RAM, 4+ CPUs).
-2. Start the cluster:
-   ```powershell
+## Getting Started
+
+**Prerequisites:** Docker Desktop (about 8 GB RAM allocated) and Python 3.
+
+1. Start the cluster:
+   ```
    docker compose up -d
-   docker compose ps
    ```
-   HDFS UI: http://localhost:9870, Spark UI: http://localhost:8080
-3. Install Python packages inside the Spark containers (repeat after any container recreation):
-   ```powershell
-   docker exec -it -u root spark-master pip install numpy pandas
-   docker exec -it -u root spark-worker pip install numpy
+2. Load the data into HDFS, run the Pig cleaning script, and create the Hive tables (`sql/create_tables.hql`).
+3. Train the models:
    ```
-
-## Run the pipeline
-1. **Load raw data into HDFS**
-   ```powershell
-   docker exec -it namenode bash
-   ```
-   ```bash
-   hdfs dfs -mkdir -p /data/grid/raw /data/grid/clean
-   hdfs dfs -put -f /data/grid_demand.csv /data/grid/raw/
-   ```
-2. **Clean with Pig** (Pig must be installed in the namenode container, e.g. extracted to `/opt/pig-0.17.0`; it is lost if the container is recreated)
-   ```bash
-   /opt/pig-0.17.0/bin/pig -x local /data/clean_grid_data.pig
-   hdfs dfs -put -f /tmp/grid_demand_clean/part-m-00000 /data/grid/clean/grid_demand_clean.csv
-   ```
-   The script drops the header row, rows with NULL `max_demand_met`/`energy_met`/`drawl_schedule`, and rows with `max_demand_met <= 0`. Result: 69,012 → 62,972 rows.
-3. **Create the Hive tables**
-   ```powershell
-   docker cp sql/create_tables.hql hive-server:/tmp/create_tables.hql
-   docker exec -it hive-server beeline -u jdbc:hive2://localhost:10000 -f /tmp/create_tables.hql
-   ```
-4. **Train and predict**
-   ```powershell
    docker exec -it -u root -e HOME=/tmp spark-master spark-submit --master spark://spark-master:7077 --conf spark.jars.ivy=/tmp/.ivy2 /scripts/train_model.py
    ```
-   Writes `data/predictions/predictions.csv`.
-5. **Dashboards**
-   ```powershell
-   python -m venv venv
-   .\venv\Scripts\activate
+   Predictions are written to `data/predictions/predictions.csv`.
+4. Launch the dashboards:
+   ```
    pip install -r requirements.txt
    streamlit run user_interface.py
    streamlit run operator_interface.py --server.port 8502
    ```
 
-## Method
-- Features per state (PySpark `Window`): `lag_1`, `lag_7`, 7-day and 30-day rolling average, 7-day rolling max, plus day of week, month, day of year, `energy_met`, `drawl_schedule` and a one-hot state encoding.
-- Chronological 80/20 train/test split per state (no random split, because this is a time series).
-- Models: Linear Regression and Random Forest (50 trees, depth 8); metrics RMSE and MAPE.
-- Essar steel (a single industrial consumer whose data ends 2020-04-15) is excluded.
+## Approach
 
-## Results (all states, 12,547 test rows)
+- **Cleaning:** invalid and missing records are removed (69,012 → 62,972 rows).
+- **Features:** previous-day and previous-week demand, 7-day and 30-day rolling statistics, calendar features, and state.
+- **Models:** Linear Regression and Random Forest, trained on the first 80% of each state's history and tested on the most recent 20%.
+- **Metrics:** RMSE and MAPE.
+
+## Results
+
 | Model | RMSE | MAPE |
 |---|---|---|
-| Linear Regression | 422.44 MW | 6.21% |
-| Random Forest | 634.92 MW | 5.24% |
+| Linear Regression | 422 MW | 6.21% |
+| Random Forest | 635 MW | 5.24% |
 
-The script keeps the model with the lower RMSE (Linear Regression). Most states are under 5% MAPE (Kerala 2.8%, DVC 1.9%). Small north-eastern states (Sikkim 22.8%, Mizoram 16.9%, Nagaland, Arunachal, Manipur) and Telangana (15.3%) are weakest.
+Most states are forecast within 5% error. Smaller north-eastern states and Telangana show higher error.
 
-## Known limitations
-- **Data gaps:** 29 days are empty for all 36 entities; Pig removes them rather than imputing, so lags near those days are shifted by a day or so. DD, DNH and Jharkhand have shorter histories.
-- **Possible leakage:** the rolling windows include the current day and `energy_met` is a same-day value, so reported accuracy is probably optimistic for a true day-ahead forecast.
-- **Daily data only:** the dataset has no time-of-day information, so the time of the daily peak cannot be predicted.
-- **Spark Parquet output:** Spark's Parquet writer produced no data files on the Docker/WSL2/Windows bind mount, so predictions are collected with `toPandas()` and written as CSV.
+## Limitations
 
-## Data source
-Kaggle: Indian Power Demand & Shortage Data (2020–2025), originally from Grid-India/POSOCO daily reports.
+- The dataset contains days with no data, which are excluded rather than estimated.
+- Accuracy figures are likely optimistic for true day-ahead forecasting, because some features use same-day values.
+- Only daily data is available, so the time of day at which peak demand occurs cannot be predicted.
+
+## Data Source
+
+Grid-India (POSOCO) daily reports, via the Kaggle dataset "Indian Power Demand & Shortage Data (2020–2025)".
